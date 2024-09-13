@@ -1,4 +1,5 @@
 use pcap_file::pcap::PcapReader;
+use simple_logger::SimpleLogger;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -10,12 +11,19 @@ use clap::Parser;
 // Number of packets in a chunk to be processed
 const CHUNK_SIZE: u32 = 1000;
 
+// Port numbers for our services
+const DEST_PORTS: [u16; 2] = [15515, 15516];
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Optional flag '-r' to enable reordering of the packets according to quote accept time
+    /// Optional flag to enable reordering of the packets according to quote accept time.
     #[arg(short = 'r')]
     reordering: bool,
+
+    /// Optional flag to enable debug.
+    #[arg(short = 'd')]
+    debug: bool,
 
     /// File argument (required)
     file: String,
@@ -145,11 +153,19 @@ fn main() -> anyhow::Result<()> {
     //
     let cli = Cli::parse();
 
-    dbg!(&cli);
+    SimpleLogger::new()
+        .with_level(match cli.debug {
+            true => log::LevelFilter::Debug,
+            false => log::LevelFilter::Info,
+        })
+        .init()?;
+
+    log::debug!("cli arguments = {:#?}", &cli);
 
     let pcap_file =
         File::open(&cli.file).context(format!("Unable to open '{}' pcap file", cli.file))?;
-    let mut pcap_reader = PcapReader::new(pcap_file).unwrap();
+    let mut pcap_reader = PcapReader::new(pcap_file)
+        .context(format!("pcap '{}' is not a valid pcap file", cli.file))?;
 
     // // Read test.pcap
     // while let Some(pkt) = pcap_reader.next_packet() {
@@ -164,23 +180,23 @@ fn main() -> anyhow::Result<()> {
     //
     // }
     let pkt = pcap_reader.next_packet().unwrap();
-    // let pkt = pcap_reader.next_packet().unwrap();
+    let pkt = pcap_reader.next_packet().unwrap(); // Get the second packet
     let pkt = pkt.unwrap();
 
     println!("{:?}", pkt.timestamp);
     println!("{:x?}", pkt.data);
 
-    let ethernet = etherparse::Ethernet2Slice::from_slice_without_fcs(&pkt.data).unwrap();
-    let ip = etherparse::IpSlice::from_slice(ethernet.payload().payload).unwrap();
-    let udp = etherparse::UdpSlice::from_slice(ip.payload().payload).unwrap();
+    let ethernet_layer = etherparse::Ethernet2Slice::from_slice_without_fcs(&pkt.data).unwrap();
+    let ip_layer = etherparse::IpSlice::from_slice(ethernet_layer.payload().payload).unwrap();
+    let udp_layer = etherparse::UdpSlice::from_slice(ip_layer.payload().payload).unwrap();
 
-    println!("{:?}", udp.source_port());
-    println!("{:?}", udp.destination_port());
-    println!("{:x?}", &udp.payload());
-    println!("{:x?}", &udp.payload()[0..5]);
+    println!("{:?}", udp_layer.source_port());
+    println!("{:?}", udp_layer.destination_port());
+    println!("{:x?}", &udp_layer.payload());
+    println!("{:x?}", &udp_layer.payload()[0..5]);
 
     // from_utf8_unchecked could be used and faster but it requires unsafe. So keep the safe version.
-    let magic = std::str::from_utf8(&udp.payload()[0..5]).unwrap();
+    let magic = std::str::from_utf8(&udp_layer.payload()[0..5]).unwrap();
     println!("{:?}", magic);
 
     Ok(())
