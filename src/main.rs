@@ -1,12 +1,10 @@
+use anyhow::Context;
+use clap::Parser;
 use pcap_file::pcap::PcapReader;
 use simple_logger::SimpleLogger;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-
-use anyhow::Context;
-
-use clap::Parser;
 
 // Number of packets in a chunk to be processed
 const CHUNK_SIZE: u32 = 1000;
