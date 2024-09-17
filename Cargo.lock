@@ -265,6 +265,7 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "simple_logger",
+ "thiserror",
  "time",
 ]
 

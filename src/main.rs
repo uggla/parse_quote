@@ -1,16 +1,20 @@
 use anyhow::Context;
 use clap::Parser;
+use parse_quote::{
+    display_data, duration_to_date, parse_packet, parse_packet_payload, PayloadParseError,
+};
 use pcap_file::pcap::PcapReader;
 use simple_logger::SimpleLogger;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use time::format_description::well_known::Rfc3339;
 
 // Number of packets in a chunk to be processed
-const CHUNK_SIZE: u32 = 1000;
+const CHUNK_SIZE: u32 = 6000;
 
 // Port numbers for our services
-const DEST_PORTS: [u16; 2] = [15515, 15516];
+pub const DEST_PORTS: [u16; 2] = [15515, 15516];
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -20,8 +24,8 @@ struct Cli {
     reordering: bool,
 
     /// Optional flag to enable debug.
-    #[arg(short = 'd')]
-    debug: bool,
+    #[arg(short = 'd', action = clap::ArgAction::Count)]
+    debug: u8,
 
     /// File argument (required)
     file: String,
@@ -153,9 +157,12 @@ fn main() -> anyhow::Result<()> {
 
     SimpleLogger::new()
         .with_level(match cli.debug {
-            true => log::LevelFilter::Debug,
-            false => log::LevelFilter::Info,
+            3.. => log::LevelFilter::Trace,
+            2 => log::LevelFilter::Debug,
+            1 => log::LevelFilter::Info,
+            0 => log::LevelFilter::Error,
         })
+        .with_utc_timestamps()
         .init()?;
 
     log::debug!("cli arguments = {:#?}", &cli);
@@ -165,37 +172,38 @@ fn main() -> anyhow::Result<()> {
     let mut pcap_reader = PcapReader::new(pcap_file)
         .context(format!("pcap '{}' is not a valid pcap file", cli.file))?;
 
-    // // Read test.pcap
-    // while let Some(pkt) = pcap_reader.next_packet() {
-    //     //Check if there is no error
-    //     let pkt = pkt.unwrap();
-    //
-    //     //Print the packet
-    //     println!("{:?}", pkt.timestamp);
-    //
-    //     //Do something
-    //
-    //
-    // }
-    let pkt = pcap_reader.next_packet().unwrap();
-    let pkt = pcap_reader.next_packet().unwrap(); // Get the second packet
-    let pkt = pkt.unwrap();
+    while let Some(pkt) = pcap_reader.next_packet() {
+        let pkt = pkt.context("Unable to read packet")?;
 
-    println!("{:?}", pkt.timestamp);
-    println!("{:x?}", pkt.data);
+        log::debug!(
+            "Packet timestamp: {:?}",
+            duration_to_date(&pkt.timestamp).format(&Rfc3339)
+        );
+        log::trace!("Packet data: {:x?}", pkt.data);
 
-    let ethernet_layer = etherparse::Ethernet2Slice::from_slice_without_fcs(&pkt.data).unwrap();
-    let ip_layer = etherparse::IpSlice::from_slice(ethernet_layer.payload().payload).unwrap();
-    let udp_layer = etherparse::UdpSlice::from_slice(ip_layer.payload().payload).unwrap();
+        if let Ok(quote_udp_packet) = parse_packet(&pkt, &DEST_PORTS) {
+            log::trace!("Src port: {:?}", quote_udp_packet.source_port());
+            log::trace!("Dst port: {:?}", quote_udp_packet.destination_port());
+            log::trace!("Payload: {:x?}", &quote_udp_packet.payload());
 
-    println!("{:?}", udp_layer.source_port());
-    println!("{:?}", udp_layer.destination_port());
-    println!("{:x?}", &udp_layer.payload());
-    println!("{:x?}", &udp_layer.payload()[0..5]);
-
-    // from_utf8_unchecked could be used and faster but it requires unsafe. So keep the safe version.
-    let magic = std::str::from_utf8(&udp_layer.payload()[0..5]).unwrap();
-    println!("{:?}", magic);
+            match parse_packet_payload(quote_udp_packet.payload()) {
+                Ok(data) => {
+                    log::debug!("Data: {:#?}", data);
+                    display_data(&pkt.timestamp, data)?;
+                }
+                Err(e) => match e {
+                    PayloadParseError::SignatureError => {
+                        log::warn!("{:?}", e);
+                    }
+                    _ => {
+                        log::error!("{:?}", e);
+                    }
+                },
+            }
+        } else {
+            log::warn!("Packet is not a udp packet or destination port is not valid");
+        }
+    }
 
     Ok(())
 }
