@@ -3,11 +3,12 @@ use nom::{
     error::{Error, ErrorKind, ParseError},
     IResult,
 };
+use serde::{Deserialize, Serialize};
 use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime, Time};
 
 const PACKETS_SIGNATURE: &str = "B6034";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Data {
     /*
     Data Type 	2 	B6
@@ -74,7 +75,7 @@ struct Data {
     ask_qty_4: i32,
     ask_price_5: i32,
     ask_qty_5: i32,
-    timestamp: Duration,
+    timestamp: i128,
 }
 
 // fn parse_quote_packet(input: &[u8]) -> IResult<&[u8], Data> {
@@ -321,7 +322,7 @@ fn parse_quote_packet(input: &[u8]) -> IResult<&[u8], Data, CustomError> {
         ask_qty_4,
         ask_price_5,
         ask_qty_5,
-        timestamp,
+        timestamp: timestamp.whole_microseconds(),
     };
 
     dbg!(&data);
@@ -331,10 +332,8 @@ fn parse_quote_packet(input: &[u8]) -> IResult<&[u8], Data, CustomError> {
 #[cfg(test)]
 mod test {
 
-    use pretty_assertions::assert_eq;
-    use time::Duration;
-
     use crate::{CustomError, Data};
+    use pretty_assertions::assert_eq;
 
     use super::parse_quote_packet;
 
@@ -391,10 +390,15 @@ mod test {
                     ask_qty_4: 0,
                     ask_price_5: 0,
                     ask_qty_5: 0,
-                    timestamp: Duration::seconds(32399) + Duration::nanoseconds(97000),
+                    timestamp: 32399000097,
                 }
             )
         );
+
+        let serialize = bincode::serialize::<Data>(&pkt.1).unwrap();
+        let deserialize = bincode::deserialize::<Data>(&serialize).unwrap();
+
+        assert_eq!(deserialize, pkt.1);
     }
 
     #[test]
