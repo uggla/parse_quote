@@ -1,4 +1,4 @@
-use parse_quote::{duration_to_offsetdatetime, Data};
+use crate::{duration_to_offsetdatetime, Data};
 use time::format_description::well_known::Rfc3339;
 
 pub fn display_data(data: &Data) -> anyhow::Result<()> {

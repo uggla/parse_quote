@@ -1,3 +1,5 @@
+mod utils;
+
 use etherparse::err::{ip, LenError};
 use nom::bytes::complete::{tag, take};
 use serde::{Deserialize, Serialize};
@@ -635,9 +637,9 @@ pub fn parse_packet_payload(
 #[cfg(test)]
 mod test {
 
-    use super::parse_packet_payload;
-    use crate::{Data, PayloadParseError};
+    use super::*;
     use pretty_assertions::assert_eq;
+    use utils::display_data;
 
     const PKT_OK: &[u8] = &[
         0x42, 0x36, 0x30, 0x33, 0x34, 0x4b, 0x52, 0x34, 0x32, 0x30, 0x31, 0x46, 0x33, 0x32, 0x37,
