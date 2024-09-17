@@ -2,7 +2,7 @@ use etherparse::err::{ip, LenError};
 use nom::bytes::complete::{tag, take};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::OffsetDateTime;
 const PACKETS_SIGNATURE: &str = "B6034";
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -37,6 +37,9 @@ pub enum PacketParseError {
         allowed_ports: Vec<u16>,
     },
 }
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Packets(Vec<Data>);
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Data {
@@ -84,6 +87,7 @@ pub struct Data {
     Quote accept time 	8 	HHMMSSuu
     End of Message 	1 	0xff
     */
+    pub pkt_timestamp: std::time::Duration,
     pub isin: String,
     pub bid_price_1: i32,
     pub bid_qty_1: i32,
@@ -108,14 +112,15 @@ pub struct Data {
     pub timestamp: i128,
 }
 
-pub fn duration_to_date(duration: &std::time::Duration) -> OffsetDateTime {
+pub fn duration_to_offsetdatetime(duration: &std::time::Duration) -> OffsetDateTime {
     let nanoseconds = duration.as_nanos();
 
-    let offset_date_time =
-        OffsetDateTime::from_unix_timestamp_nanos(nanoseconds.try_into().expect("Fail to get ns"))
-            .expect("Invalid time components");
+    OffsetDateTime::from_unix_timestamp_nanos(nanoseconds.try_into().expect("Fail to get ns"))
+        .expect("Invalid time components")
+}
 
-    offset_date_time
+pub fn std_to_time_duration(duration: &std::time::Duration) -> time::Duration {
+    time::Duration::nanoseconds(duration.as_nanos().try_into().expect("Fail to get ns"))
 }
 
 pub fn parse_packet<'a>(
@@ -135,7 +140,10 @@ pub fn parse_packet<'a>(
     Ok(udp_layer)
 }
 
-pub fn parse_packet_payload(input: &[u8]) -> Result<Data, PayloadParseError> {
+pub fn parse_packet_payload(
+    input: &[u8],
+    pkt_timestamp: std::time::Duration,
+) -> Result<Data, PayloadParseError> {
     // Try to match the signature "B6034"
     let (input, _signature) =
         match tag::<&str, &[u8], nom::error::Error<&[u8]>>(PACKETS_SIGNATURE)(input) {
@@ -596,6 +604,7 @@ pub fn parse_packet_payload(input: &[u8]) -> Result<Data, PayloadParseError> {
         + time::Duration::microseconds(micro_seconde);
 
     let data = Data {
+        pkt_timestamp,
         isin: isin.to_string(),
         bid_price_1,
         bid_qty_1,
@@ -621,37 +630,6 @@ pub fn parse_packet_payload(input: &[u8]) -> Result<Data, PayloadParseError> {
     };
 
     Ok(data)
-}
-
-pub fn display_data(pkt_timestamp: &std::time::Duration, data: Data) -> anyhow::Result<()> {
-    println!(
-        "{} {} {} {}@{} {}@{} {}@{} {}@{} {}@{} {}@{} {}@{} {}@{} {}@{} {}@{}",
-        duration_to_date(pkt_timestamp).format(&Rfc3339)?,
-        duration_to_date(pkt_timestamp).time(),
-        data.isin,
-        data.bid_qty_5,
-        data.bid_price_5,
-        data.bid_qty_4,
-        data.bid_price_4,
-        data.bid_qty_3,
-        data.bid_price_3,
-        data.bid_qty_2,
-        data.bid_price_2,
-        data.bid_qty_1,
-        data.bid_price_1,
-        data.ask_qty_1,
-        data.ask_price_1,
-        data.ask_qty_2,
-        data.ask_price_2,
-        data.ask_qty_3,
-        data.ask_price_3,
-        data.ask_qty_4,
-        data.ask_price_4,
-        data.ask_qty_5,
-        data.ask_price_5,
-    );
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -699,13 +677,14 @@ mod test {
 
     #[test]
     fn test_parse_quote_packet_ok() {
-        let pkt = parse_packet_payload(PKT_OK);
+        let pkt = parse_packet_payload(PKT_OK, std::time::Duration::from_secs(5));
         dbg!(&pkt);
         assert!(pkt.is_ok());
         let pkt = pkt.unwrap();
         assert_eq!(
             pkt,
             Data {
+                pkt_timestamp: std::time::Duration::from_secs(5),
                 isin: "KR4201F32705".to_string(),
                 bid_price_1: 0,
                 bid_qty_1: 0,
@@ -734,7 +713,7 @@ mod test {
 
     #[test]
     fn test_serialize_deserialize_data() {
-        let pkt = parse_packet_payload(PKT_OK).unwrap();
+        let pkt = parse_packet_payload(PKT_OK, std::time::Duration::from_secs(5)).unwrap();
 
         let serialize = bincode::serialize::<Data>(&pkt).unwrap();
         let deserialize = bincode::deserialize::<Data>(&serialize).unwrap();
@@ -744,7 +723,7 @@ mod test {
 
     #[test]
     fn test_parse_quote_packet_ko() {
-        let pkt = parse_packet_payload(PKT_KO);
+        let pkt = parse_packet_payload(PKT_KO, std::time::Duration::from_secs(5));
         assert!(pkt.is_err());
         assert_eq!(pkt.unwrap_err(), PayloadParseError::SignatureError);
     }

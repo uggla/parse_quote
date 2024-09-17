@@ -1,7 +1,9 @@
+mod utils;
+
 use anyhow::Context;
 use clap::Parser;
 use parse_quote::{
-    display_data, duration_to_date, parse_packet, parse_packet_payload, PayloadParseError,
+    duration_to_offsetdatetime, parse_packet, parse_packet_payload, Data, PayloadParseError,
 };
 use pcap_file::pcap::PcapReader;
 use simple_logger::SimpleLogger;
@@ -11,7 +13,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use time::format_description::well_known::Rfc3339;
 
 // Number of packets in a chunk to be processed
-const CHUNK_SIZE: u32 = 6000;
+const CHUNK_SIZE: u32 = 5000;
 
 // Port numbers for our services
 pub const DEST_PORTS: [u16; 2] = [15515, 15516];
@@ -172,12 +174,15 @@ fn main() -> anyhow::Result<()> {
     let mut pcap_reader = PcapReader::new(pcap_file)
         .context(format!("pcap '{}' is not a valid pcap file", cli.file))?;
 
-    while let Some(pkt) = pcap_reader.next_packet() {
-        let pkt = pkt.context("Unable to read packet")?;
+    let mut num_packets = 0;
+    let mut paquets: Vec<Data> = Vec::with_capacity(CHUNK_SIZE as usize);
+    let mut chunk_index = 0;
+    while let Some(packet) = pcap_reader.next_packet() {
+        let pkt = packet.context("Unable to read packet")?;
 
         log::debug!(
             "Packet timestamp: {:?}",
-            duration_to_date(&pkt.timestamp).format(&Rfc3339)
+            duration_to_offsetdatetime(&pkt.timestamp).format(&Rfc3339)
         );
         log::trace!("Packet data: {:x?}", pkt.data);
 
@@ -186,10 +191,26 @@ fn main() -> anyhow::Result<()> {
             log::trace!("Dst port: {:?}", quote_udp_packet.destination_port());
             log::trace!("Payload: {:x?}", &quote_udp_packet.payload());
 
-            match parse_packet_payload(quote_udp_packet.payload()) {
+            match parse_packet_payload(quote_udp_packet.payload(), pkt.timestamp) {
                 Ok(data) => {
                     log::debug!("Data: {:#?}", data);
-                    display_data(&pkt.timestamp, data)?;
+                    // utils::display_data(&data)?;
+                    add_packet(
+                        &mut paquets,
+                        data,
+                        &pkt.timestamp,
+                        cli.reordering,
+                        &mut num_packets,
+                    );
+                    if num_packets == CHUNK_SIZE {
+                        write_chunk(&mut paquets, chunk_index, cli.reordering)?;
+                        num_packets = 0;
+                        chunk_index += 1;
+                        // paquets.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                        //
+                        //
+                        paquets.clear();
+                    }
                 }
                 Err(e) => match e {
                     PayloadParseError::SignatureError => {
@@ -204,6 +225,64 @@ fn main() -> anyhow::Result<()> {
             log::warn!("Packet is not a udp packet or destination port is not valid");
         }
     }
+    write_chunk(&mut paquets, chunk_index, cli.reordering)?;
 
+    if !cli.reordering {
+        for chunk in 0..chunk_index {
+            let filename = format!("chunks/chunk_{}.txt", chunk);
+            let file = File::open(filename).context("Unable to open file")?;
+            let file = BufReader::new(file);
+
+            for line in file.lines() {
+                dbg!(&line);
+                let data: Data = bincode::deserialize(line.context("bla bla")?.as_bytes())
+                    .context("Fail to deserialize data")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn add_packet(
+    paquets: &mut Vec<Data>,
+    data: Data,
+    pkt_timestamp: &std::time::Duration,
+    reordering: bool,
+    num_packets: &mut u32,
+) {
+    if !reordering {
+        paquets.push(data);
+        *num_packets += 1;
+    } else {
+        let pkt_time = duration_to_offsetdatetime(pkt_timestamp).time();
+        let accept_time = duration_to_offsetdatetime(&std::time::Duration::from_nanos(
+            data.timestamp.try_into().unwrap(),
+        ))
+        .time();
+
+        if accept_time - pkt_time < time::Duration::seconds(3) {
+            paquets.push(data);
+            *num_packets += 1;
+        }
+
+        log::debug!("duration: {:?}", accept_time - pkt_time);
+    }
+}
+
+fn write_chunk(chunk: &mut [Data], chunk_index: usize, reordering: bool) -> anyhow::Result<()> {
+    let filename = format!("chunks/chunk_{}.txt", chunk_index);
+    let output_file = File::create(filename).context("Unable to create output file")?;
+    let mut output_file = BufWriter::new(output_file);
+    if reordering {
+        chunk.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    }
+    for data in chunk {
+        let data_serialized = bincode::serialize(data).context("Unable to serialize data")?;
+        writeln!(output_file, "{:?}", data_serialized).context("Unable to write chunk data")?;
+        // output_file
+        //     .write_all(&data_serialized)
+        //     .context("Unable to write chunk data")?;
+    }
     Ok(())
 }
