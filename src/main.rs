@@ -3,9 +3,11 @@ mod utils;
 use anyhow::Context;
 use clap::Parser;
 use parse_quote::{
-    duration_to_offsetdatetime, parse_packet, parse_packet_payload, Data, PayloadParseError,
+    duration_to_offsetdatetime, parse_packet, parse_packet_new, parse_packet_payload, Data,
+    PayloadParseError,
 };
-use pcap_file::pcap::PcapReader;
+use pcap_file::pcap::{PcapPacket, PcapReader};
+use pcap_file::PcapError;
 use simple_logger::SimpleLogger;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -177,69 +179,86 @@ fn main() -> anyhow::Result<()> {
     let mut num_packets = 0;
     let mut paquets: Vec<Data> = Vec::with_capacity(CHUNK_SIZE as usize);
     let mut chunk_index = 0;
-    while let Some(packet) = pcap_reader.next_packet() {
-        let pkt = packet.context("Unable to read packet")?;
 
-        log::debug!(
-            "Packet timestamp: {:?}",
-            duration_to_offsetdatetime(&pkt.timestamp).format(&Rfc3339)
-        );
-        log::trace!("Packet data: {:x?}", pkt.data);
+    let pcap_iterator = PcapIterator::new(&mut pcap_reader);
 
-        if let Ok(quote_udp_packet) = parse_packet(&pkt, &DEST_PORTS) {
-            log::trace!("Src port: {:?}", quote_udp_packet.source_port());
-            log::trace!("Dst port: {:?}", quote_udp_packet.destination_port());
-            log::trace!("Payload: {:x?}", &quote_udp_packet.payload());
+    pcap_iterator
+        .filter_map(|packet| {
+            log::debug!(
+                "Packet timestamp: {:?}",
+                duration_to_offsetdatetime(&packet.0).format(&Rfc3339)
+            );
 
-            match parse_packet_payload(quote_udp_packet.payload(), pkt.timestamp) {
-                Ok(data) => {
-                    log::debug!("Data: {:#?}", data);
-                    // utils::display_data(&data)?;
-                    add_packet(
-                        &mut paquets,
-                        data,
-                        &pkt.timestamp,
-                        cli.reordering,
-                        &mut num_packets,
-                    );
-                    if num_packets == CHUNK_SIZE {
-                        write_chunk(&mut paquets, chunk_index, cli.reordering)?;
-                        num_packets = 0;
-                        chunk_index += 1;
-                        // paquets.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                        //
-                        //
-                        paquets.clear();
-                    }
-                }
-                Err(e) => match e {
-                    PayloadParseError::SignatureError => {
-                        log::warn!("{:?}", e);
-                    }
-                    _ => {
-                        log::error!("{:?}", e);
-                    }
-                },
-            }
-        } else {
-            log::warn!("Packet is not a udp packet or destination port is not valid");
-        }
-    }
-    write_chunk(&mut paquets, chunk_index, cli.reordering)?;
-
-    if !cli.reordering {
-        for chunk in 0..chunk_index {
-            let filename = format!("chunks/chunk_{}.txt", chunk);
-            let file = File::open(filename).context("Unable to open file")?;
-            let file = BufReader::new(file);
-
-            for line in file.lines() {
-                dbg!(&line);
-                let data: Data = bincode::deserialize(line.context("bla bla")?.as_bytes())
-                    .context("Fail to deserialize data")?;
-            }
-        }
-    }
+            let udp_packet = parse_packet_new(&packet.1, &DEST_PORTS).ok();
+            let data = parse_packet_payload(udp_packet?.payload(), packet.0).ok();
+            data
+        })
+        .for_each(|data| {
+            utils::display_data(&data).unwrap();
+        });
+    // while let Some(packet) = pcap_reader.next_packet() {
+    //     let pkt = packet.context("Unable to read packet")?;
+    //
+    //     log::debug!(
+    //         "Packet timestamp: {:?}",
+    //         duration_to_offsetdatetime(&pkt.timestamp).format(&Rfc3339)
+    //     );
+    //     log::trace!("Packet data: {:x?}", pkt.data);
+    //
+    //     if let Ok(quote_udp_packet) = parse_packet(&pkt, &DEST_PORTS) {
+    //         log::trace!("Src port: {:?}", quote_udp_packet.source_port());
+    //         log::trace!("Dst port: {:?}", quote_udp_packet.destination_port());
+    //         log::trace!("Payload: {:x?}", &quote_udp_packet.payload());
+    //
+    //         match parse_packet_payload(quote_udp_packet.payload(), pkt.timestamp) {
+    //             Ok(data) => {
+    //                 log::debug!("Data: {:#?}", data);
+    //                 // utils::display_data(&data)?;
+    //                 add_packet(
+    //                     &mut paquets,
+    //                     data,
+    //                     &pkt.timestamp,
+    //                     cli.reordering,
+    //                     &mut num_packets,
+    //                 );
+    //                 if num_packets == CHUNK_SIZE {
+    //                     write_chunk(&mut paquets, chunk_index, cli.reordering)?;
+    //                     num_packets = 0;
+    //                     chunk_index += 1;
+    //                     // paquets.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    //                     //
+    //                     //
+    //                     paquets.clear();
+    //                 }
+    //             }
+    //             Err(e) => match e {
+    //                 PayloadParseError::SignatureError => {
+    //                     log::warn!("{:?}", e);
+    //                 }
+    //                 _ => {
+    //                     log::error!("{:?}", e);
+    //                 }
+    //             },
+    //         }
+    //     } else {
+    //         log::warn!("Packet is not a udp packet or destination port is not valid");
+    //     }
+    // }
+    // write_chunk(&mut paquets, chunk_index, cli.reordering)?;
+    //
+    // if !cli.reordering {
+    //     for chunk in 0..chunk_index {
+    //         let filename = format!("chunks/chunk_{}.txt", chunk);
+    //         let file = File::open(filename).context("Unable to open file")?;
+    //         let file = BufReader::new(file);
+    //
+    //         for line in file.lines() {
+    //             dbg!(&line);
+    //             let data: Data = bincode::deserialize(line.context("bla bla")?.as_bytes())
+    //                 .context("Fail to deserialize data")?;
+    //         }
+    //     }
+    // }
 
     Ok(())
 }
@@ -285,4 +304,33 @@ fn write_chunk(chunk: &mut [Data], chunk_index: usize, reordering: bool) -> anyh
         //     .context("Unable to write chunk data")?;
     }
     Ok(())
+} // Assuming pcap_reader is of type PcapReader (you should replace with actual type)
+
+struct PcapIterator<'a> {
+    reader: &'a mut PcapReader<File>,
+}
+
+impl<'a> PcapIterator<'a> {
+    pub fn new(reader: &'a mut PcapReader<File>) -> Self {
+        PcapIterator { reader }
+    }
+}
+
+impl<'a> Iterator for PcapIterator<'a> {
+    // type Item = Result<PcapPacket<'a>, PcapError>;
+    // type Item = PcapPacket<'a>;
+    type Item = (std::time::Duration, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.reader.next_packet() {
+            Some(packet) => match packet {
+                Ok(packet) => Some((packet.timestamp, packet.data.to_vec())),
+                Err(e) => {
+                    log::error!("{:?}", e);
+                    None
+                }
+            },
+            None => None,
+        }
+    }
 }

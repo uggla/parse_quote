@@ -142,6 +142,23 @@ pub fn parse_packet<'a>(
     Ok(udp_layer)
 }
 
+pub fn parse_packet_new<'a>(
+    pkt: &'a [u8],
+    valid_dst_ports: &[u16],
+) -> Result<etherparse::UdpSlice<'a>, PacketParseError> {
+    let ethernet_layer = etherparse::Ethernet2Slice::from_slice_without_fcs(&pkt)?;
+    let ip_layer = etherparse::IpSlice::from_slice(ethernet_layer.payload().payload)?;
+    let udp_layer = etherparse::UdpSlice::from_slice(ip_layer.payload().payload)?;
+
+    if !valid_dst_ports.contains(&udp_layer.destination_port()) {
+        return Err(PacketParseError::InvalidDestinationPort {
+            dest_port: udp_layer.destination_port(),
+            allowed_ports: valid_dst_ports.to_vec(),
+        });
+    }
+    Ok(udp_layer)
+}
+
 pub fn parse_packet_payload(
     input: &[u8],
     pkt_timestamp: std::time::Duration,
