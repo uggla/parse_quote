@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use parse_quote::{
     duration_to_offsetdatetime, parse_packet, parse_packet_new, parse_packet_payload, Data,
-    PayloadParseError,
+    PacketParseError, PayloadParseError,
 };
 use pcap_file::pcap::{PcapPacket, PcapReader};
 use pcap_file::PcapError;
@@ -176,6 +176,7 @@ fn main() -> anyhow::Result<()> {
     let mut pcap_reader = PcapReader::new(pcap_file)
         .context(format!("pcap '{}' is not a valid pcap file", cli.file))?;
 
+    log::info!("Start processing pcap file '{}'", &cli.file);
     let mut num_packets = 0;
     let mut paquets: Vec<Data> = Vec::with_capacity(CHUNK_SIZE as usize);
     let mut chunk_index = 0;
@@ -184,13 +185,51 @@ fn main() -> anyhow::Result<()> {
 
     pcap_iterator
         .filter_map(|packet| {
-            log::debug!(
+            let packet = match packet {
+                Ok(packet) => packet,
+                Err(_) => {
+                    log::error!("Unable to read packet");
+                    return None;
+                }
+            };
+
+            log::trace!(
                 "Packet timestamp: {:?}",
-                duration_to_offsetdatetime(&packet.0).format(&Rfc3339)
+                duration_to_offsetdatetime(&packet.0).format(&Rfc3339),
             );
 
-            let udp_packet = parse_packet_new(&packet.1, &DEST_PORTS).ok();
-            let data = parse_packet_payload(udp_packet?.payload(), packet.0).ok();
+            log::trace!("Packet data: {:x?}", packet.1);
+
+            let udp_packet = match parse_packet_new(&packet.1, &DEST_PORTS) {
+                Ok(udp_packet) => udp_packet,
+                Err(e) => {
+                    match e {
+                        PacketParseError::InvalidDestinationPort { .. } => {
+                            log::warn!("{}", e);
+                        }
+                        _ => {
+                            log::error!("{}", e);
+                        }
+                    }
+                    return None;
+                }
+            };
+
+            let data = match parse_packet_payload(udp_packet.payload(), packet.0) {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    match e {
+                        PayloadParseError::SignatureError => {
+                            log::warn!("{}", e);
+                        }
+                        _ => {
+                            log::error!("{}", e);
+                        }
+                    }
+                    return None;
+                }
+            };
+
             data
         })
         .for_each(|data| {
@@ -304,7 +343,7 @@ fn write_chunk(chunk: &mut [Data], chunk_index: usize, reordering: bool) -> anyh
         //     .context("Unable to write chunk data")?;
     }
     Ok(())
-} // Assuming pcap_reader is of type PcapReader (you should replace with actual type)
+}
 
 struct PcapIterator<'a> {
     reader: &'a mut PcapReader<File>,
@@ -319,16 +358,13 @@ impl<'a> PcapIterator<'a> {
 impl<'a> Iterator for PcapIterator<'a> {
     // type Item = Result<PcapPacket<'a>, PcapError>;
     // type Item = PcapPacket<'a>;
-    type Item = (std::time::Duration, Vec<u8>);
+    type Item = Result<(std::time::Duration, Vec<u8>), PcapError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.reader.next_packet() {
             Some(packet) => match packet {
-                Ok(packet) => Some((packet.timestamp, packet.data.to_vec())),
-                Err(e) => {
-                    log::error!("{:?}", e);
-                    None
-                }
+                Ok(packet) => Some(Ok((packet.timestamp, packet.data.to_vec()))),
+                Err(e) => Some(Err(e)),
             },
             None => None,
         }
