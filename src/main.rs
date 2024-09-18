@@ -2,12 +2,12 @@ mod utils;
 
 use anyhow::Context;
 use clap::Parser;
+use itertools::Itertools;
 use parse_quote::{
-    duration_to_offsetdatetime, parse_packet, parse_packet_new, parse_packet_payload, Data,
-    PacketParseError, PayloadParseError,
+    duration_to_offsetdatetime, parse_packet, parse_packet_payload, Data, PacketParseError,
+    PayloadParseError, PcapIterator,
 };
-use pcap_file::pcap::{PcapPacket, PcapReader};
-use pcap_file::PcapError;
+use pcap_file::pcap::PcapReader;
 use simple_logger::SimpleLogger;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -183,58 +183,75 @@ fn main() -> anyhow::Result<()> {
 
     let pcap_iterator = PcapIterator::new(&mut pcap_reader);
 
-    pcap_iterator
-        .filter_map(|packet| {
-            let packet = match packet {
-                Ok(packet) => packet,
-                Err(_) => {
-                    log::error!("Unable to read packet");
-                    return None;
-                }
-            };
+    let pcap_iterator = pcap_iterator.filter_map(|packet| {
+        let packet = match packet {
+            Ok(packet) => packet,
+            Err(_) => {
+                log::error!("Unable to read packet");
+                return None;
+            }
+        };
 
-            log::trace!(
-                "Packet timestamp: {:?}",
-                duration_to_offsetdatetime(&packet.0).format(&Rfc3339),
-            );
+        log::trace!(
+            "Packet timestamp: {:?}",
+            duration_to_offsetdatetime(&packet.0).format(&Rfc3339),
+        );
 
-            log::trace!("Packet data: {:x?}", packet.1);
+        log::trace!("Packet data: {:x?}", packet.1);
 
-            let udp_packet = match parse_packet_new(&packet.1, &DEST_PORTS) {
-                Ok(udp_packet) => udp_packet,
-                Err(e) => {
-                    match e {
-                        PacketParseError::InvalidDestinationPort { .. } => {
-                            log::warn!("{}", e);
-                        }
-                        _ => {
-                            log::error!("{}", e);
-                        }
+        let udp_packet = match parse_packet(&packet.1, &DEST_PORTS) {
+            Ok(udp_packet) => udp_packet,
+            Err(error) => {
+                log::warn!("{}", error);
+                return None;
+            }
+        };
+
+        let data = match parse_packet_payload(udp_packet.payload(), packet.0) {
+            Ok(data) => Some(data),
+            Err(error) => {
+                match error {
+                    PayloadParseError::SignatureError => {
+                        log::warn!("{}", error);
                     }
-                    return None;
-                }
-            };
-
-            let data = match parse_packet_payload(udp_packet.payload(), packet.0) {
-                Ok(data) => Some(data),
-                Err(e) => {
-                    match e {
-                        PayloadParseError::SignatureError => {
-                            log::warn!("{}", e);
-                        }
-                        _ => {
-                            log::error!("{}", e);
-                        }
+                    _ => {
+                        log::error!("{}", error);
                     }
-                    return None;
                 }
-            };
+                return None;
+            }
+        };
 
-            data
-        })
-        .for_each(|data| {
+        log::debug!("data: {:?}", data);
+        data
+    });
+
+    if !cli.reordering {
+        pcap_iterator.for_each(|data| {
             utils::display_data(&data).unwrap();
         });
+    } else {
+        pcap_iterator
+            .filter(|data| {
+                let pkt_time = duration_to_offsetdatetime(&data.pkt_timestamp).time();
+                let accept_time = duration_to_offsetdatetime(&std::time::Duration::from_nanos(
+                    data.timestamp.try_into().unwrap(),
+                ))
+                .time();
+
+                if accept_time - pkt_time < time::Duration::seconds(3) {
+                    log::debug!("duration: {:?}", accept_time - pkt_time);
+                    return true;
+                }
+                false
+            })
+            .sorted_by_key(|data| data.timestamp)
+            .for_each(|data| {
+                utils::display_data(&data).unwrap();
+            });
+    }
+
+    log::info!("End processing pcap file '{}'", &cli.file);
     // while let Some(packet) = pcap_reader.next_packet() {
     //     let pkt = packet.context("Unable to read packet")?;
     //
@@ -343,30 +360,4 @@ fn write_chunk(chunk: &mut [Data], chunk_index: usize, reordering: bool) -> anyh
         //     .context("Unable to write chunk data")?;
     }
     Ok(())
-}
-
-struct PcapIterator<'a> {
-    reader: &'a mut PcapReader<File>,
-}
-
-impl<'a> PcapIterator<'a> {
-    pub fn new(reader: &'a mut PcapReader<File>) -> Self {
-        PcapIterator { reader }
-    }
-}
-
-impl<'a> Iterator for PcapIterator<'a> {
-    // type Item = Result<PcapPacket<'a>, PcapError>;
-    // type Item = PcapPacket<'a>;
-    type Item = Result<(std::time::Duration, Vec<u8>), PcapError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.reader.next_packet() {
-            Some(packet) => match packet {
-                Ok(packet) => Some(Ok((packet.timestamp, packet.data.to_vec()))),
-                Err(e) => Some(Err(e)),
-            },
-            None => None,
-        }
-    }
 }

@@ -1,7 +1,10 @@
 mod utils;
 
+use std::fs::File;
+
 use etherparse::err::{ip, LenError};
 use nom::bytes::complete::{tag, take};
+use pcap_file::{pcap::PcapReader, PcapError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -30,7 +33,7 @@ pub enum PacketParseError {
     #[error("This packet does not comply with an ethernet, or udp packet")]
     EthernetPacketError(#[from] LenError),
 
-    #[error("This packet does not comply an IP packet")]
+    #[error("This packet does not comply with an IP packet")]
     IpPacketError(#[from] ip::SliceError),
 
     #[error("This packet destination port \"{dest_port:?}\" is not part of the allowed destination ports ({allowed_ports:?})")]
@@ -114,6 +117,31 @@ pub struct Data {
     pub timestamp: i128,
 }
 
+pub struct PcapIterator<'a> {
+    reader: &'a mut PcapReader<File>,
+}
+
+impl<'a> PcapIterator<'a> {
+    pub fn new(reader: &'a mut PcapReader<File>) -> Self {
+        PcapIterator { reader }
+    }
+}
+
+impl<'a> Iterator for PcapIterator<'a> {
+    // type Item = Result<PcapPacket<'a>, PcapError>;
+    // type Item = PcapPacket<'a>;
+    type Item = Result<(std::time::Duration, Vec<u8>), PcapError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.reader.next_packet() {
+            Some(packet) => match packet {
+                Ok(packet) => Some(Ok((packet.timestamp, packet.data.to_vec()))),
+                Err(e) => Some(Err(e)),
+            },
+            None => None,
+        }
+    }
+}
 pub fn duration_to_offsetdatetime(duration: &std::time::Duration) -> OffsetDateTime {
     let nanoseconds = duration.as_nanos();
 
@@ -125,7 +153,7 @@ pub fn std_to_time_duration(duration: &std::time::Duration) -> time::Duration {
     time::Duration::nanoseconds(duration.as_nanos().try_into().expect("Fail to get ns"))
 }
 
-pub fn parse_packet<'a>(
+pub fn parse_packet_old<'a>(
     pkt: &'a pcap_file::pcap::PcapPacket<'a>,
     valid_dst_ports: &[u16],
 ) -> Result<etherparse::UdpSlice<'a>, PacketParseError> {
@@ -142,7 +170,7 @@ pub fn parse_packet<'a>(
     Ok(udp_layer)
 }
 
-pub fn parse_packet_new<'a>(
+pub fn parse_packet<'a>(
     pkt: &'a [u8],
     valid_dst_ports: &[u16],
 ) -> Result<etherparse::UdpSlice<'a>, PacketParseError> {
